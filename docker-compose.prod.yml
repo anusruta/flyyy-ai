@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: flyyy_postgres_prod
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: always
+    networks:
+      - flyyy_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flyyy_backend_prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SYNC_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      OTEL_SERVICE_NAME: flyyy-backend-prod
+      RETENTION_CHECK_INTERVAL_HOURS: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    networks:
+      - flyyy_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  seeder:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flyyy_seeder_prod
+    command: python seed_data.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SYNC_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - flyyy_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: flyyy_frontend_prod
+    restart: always
+    networks:
+      - flyyy_net
+
+  nginx:
+    image: nginx:alpine
+    container_name: flyyy_nginx_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: always
+    networks:
+      - flyyy_net
+
+  certbot:
+    image: certbot/certbot
+    container_name: flyyy_certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    restart: unless-stopped
+
+volumes:
+  postgres_data_prod:
+
+networks:
+  flyyy_net:
+    driver: bridge
